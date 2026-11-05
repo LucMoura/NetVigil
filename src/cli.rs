@@ -1,6 +1,7 @@
 //! Command-line interface definition for NetVigil.
 
 use std::ffi::OsStr;
+use std::path::PathBuf;
 
 use clap::builder::TypedValueParser;
 use clap::error::ErrorKind;
@@ -16,6 +17,14 @@ use crate::target::{Target, TargetError};
     about = "Network intelligence and reconnaissance CLI"
 )]
 pub struct Cli {
+    /// Path to the configuration file.
+    ///
+    /// There is no implicit default. The operator must select the file
+    /// explicitly so that configuration is never loaded from the current
+    /// working directory by accident.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+
     /// Subcommand to execute.
     #[command(subcommand)]
     pub command: Commands,
@@ -105,6 +114,7 @@ mod tests {
         match cli {
             Ok(Cli {
                 command: Commands::Scan(args),
+                ..
             }) => assert_eq!(args.target.to_string(), "127.0.0.1"),
             other => panic!("expected scan subcommand, got {other:?}"),
         }
@@ -117,6 +127,7 @@ mod tests {
         match cli {
             Ok(Cli {
                 command: Commands::Scan(args),
+                ..
             }) => assert_eq!(args.target.as_hostname(), Some("example.com")),
             other => panic!("expected scan subcommand, got {other:?}"),
         }
@@ -129,6 +140,7 @@ mod tests {
         match cli {
             Ok(Cli {
                 command: Commands::Scan(args),
+                ..
             }) => {
                 assert_eq!(
                     args.target.as_ip(),
@@ -250,5 +262,48 @@ mod tests {
 
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
         assert!(error.to_string().contains("TARGET"));
+    }
+
+    #[test]
+    fn config_is_not_selected_by_default() {
+        let cli = Cli::try_parse_from(["netvigil", "scan", "192.0.2.10"])
+            .expect("scan arguments must be valid");
+
+        assert_eq!(cli.config, None);
+    }
+
+    #[test]
+    fn help_does_not_advertise_an_implicit_config_default() {
+        let help = Cli::command().render_help().to_string();
+
+        assert!(!help.contains("default: netvigil.toml"), "help: {help}");
+    }
+
+    #[test]
+    fn accepts_config_before_subcommand() {
+        let cli = Cli::try_parse_from([
+            "netvigil",
+            "--config",
+            "/tmp/scope.toml",
+            "scan",
+            "192.0.2.10",
+        ])
+        .expect("global config option must be accepted before the subcommand");
+
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/scope.toml")));
+    }
+
+    #[test]
+    fn accepts_config_after_subcommand() {
+        let cli = Cli::try_parse_from([
+            "netvigil",
+            "scan",
+            "--config",
+            "/tmp/scope.toml",
+            "192.0.2.10",
+        ])
+        .expect("global config option must be accepted after the subcommand");
+
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/scope.toml")));
     }
 }

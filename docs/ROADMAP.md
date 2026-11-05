@@ -1,7 +1,8 @@
 # NetVigil Roadmap
 
 > Status: NetVigil 0.1.0. Only the items marked **Implemented** exist in the
-> repository. The authorization and scope system is the next milestone.
+> repository. Authorization, scope enforcement and TOML configuration are
+> implemented; the next milestone is host discovery.
 
 This roadmap separates what exists today from what is planned and from work
 that is intentionally deferred. Status labels are strict:
@@ -12,8 +13,8 @@ that is intentionally deferred. Status labels are strict:
 - **Out of scope**: permanently excluded from the project.
 
 Planned items must not be documented or described as existing features until
-they are implemented and tested. None of the planned items exist today. In
-particular, DNS resolution and TCP connections are not implemented.
+they are implemented and tested. DNS resolution and TCP connections are not
+implemented.
 
 ## Planned milestone order
 
@@ -21,14 +22,14 @@ The next implementation sequence is:
 
 | Order | Milestone | Status |
 | --- | --- | --- |
-| a | Authorization and scope system | Planned |
-| b | TOML configuration loading | Planned |
+| a | Authorization and scope system | Implemented |
+| b | TOML configuration loading | Implemented |
 | c | Host discovery | Planned |
 | d | Asynchronous TCP scanner | Planned |
 | e | Service identification | Planned |
 | f | JSON reports | Planned |
 
-Authorization comes before configuration so the policy can be implemented and
+Authorization was implemented before configuration so the policy could be
 tested independently of the TOML schema. No later milestone may bypass the
 authorization gate.
 
@@ -41,9 +42,9 @@ authorization gate.
 | Required `TARGET` argument | Implemented |
 | Target syntax validation and normalization | Implemented |
 | Safe, non-echoing target errors | Implemented |
-| Unit tests for CLI and target parsing | Implemented |
-| Authorization and scope enforcement | Planned |
-| TOML configuration loading | Planned |
+| Unit and integration tests for CLI, target, config and scope | Implemented |
+| Authorization and scope enforcement | Implemented |
+| TOML configuration loading | Implemented |
 | DNS resolution and host discovery | Planned |
 | Asynchronous TCP scanner | Planned |
 | Service identification | Planned |
@@ -57,6 +58,8 @@ authorization gate.
 - Single binary crate `netvigil` version `0.1.0`, Rust edition 2024.
 - `#![forbid(unsafe_code)]`.
 - `netvigil --help`, `netvigil --version`, and `netvigil scan --help`.
+- Global `--config PATH` option, required at runtime. There is no implicit
+  `netvigil.toml` default.
 - One application subcommand: `netvigil scan <TARGET>`. Clap also provides the
   generated `help` subcommand.
 - `TARGET` is required and accepts a hostname or IP literal.
@@ -78,78 +81,49 @@ authorization gate.
 - Rejected input is not echoed, preventing terminal escape and log injection.
 - Invalid targets produce a Clap validation error and exit status 2.
 
+### Authorization and scope
+
+- `src/scope.rs` implements default deny for IP literals, CIDR networks and
+  hostnames.
+- Individual IPv4/IPv6 addresses and CIDR networks are supported.
+- Hostnames are matched exactly after normalization; no DNS is performed.
+- Public, private, loopback and link-local addresses require explicit entries.
+- Unspecified, multicast and broadcast addresses are always denied.
+- Denials exit with status 1 without revealing scope entries.
+
+### TOML configuration
+
+- `src/config.rs` loads an explicitly selected TOML file with `serde` and
+  `toml`. There is no implicit default path.
+- The schema is `[scope] targets = [...]`; unknown fields and wrong types are
+  rejected.
+- The path must be a regular file. On Unix, the final component is opened with
+  `O_NOFOLLOW` and `O_NONBLOCK`; trust checks run on the opened handle. Files
+  writable by group or other users are rejected; on Linux, the file must be
+  owned by the current effective user and loading fails closed if the EUID
+  cannot be determined.
+- Files are limited to 1 MiB and 4096 rules, and are read with an explicit byte
+  bound.
+- Paths and TOML errors are sanitized; raw source lines and control sequences
+  are not emitted, while error category and line/column are preserved.
+- Missing `--config`, unreadable, untrusted and malformed files fail closed.
+- An empty target list authorizes nothing.
+- Integration tests execute the binary against local configuration fixtures.
+
 ### Current scan behavior
 
-- `netvigil scan <valid-target>` prints
+- `netvigil --config <path> scan <authorized-target>` prints
   `Scanning is not implemented yet (target: <normalized-target>).`
+- Unauthorized targets and configuration errors print an error and exit with
+  status 1.
 - No network operation is performed.
 
 ## Planned
 
-The order below is intentional. Authorization and configuration come first so
-that no later network feature can operate without explicit scope. No DNS,
-discovery, or TCP functionality should be merged before the authorization
-foundation is in place.
-
-### a) Authorization and scope system
-
-**Goal:** enforce default deny for every target before any network operation.
-
-**Scope:**
-
-- Define an explicit authorization model for IP addresses and hostnames.
-- Deny targets that are not covered by an explicit allow rule.
-- Treat private, loopback, link-local, multicast, unspecified, and other
-  special-use addresses as untrusted by default.
-- Normalize targets before evaluating authorization, including IPv4-mapped IPv6.
-- Fail closed on missing, invalid, or ambiguous authorization data.
-- Return clear errors for denied targets without leaking sensitive input.
-- Keep authorization decisions separate from syntax validation.
-- Remain testable with an in-memory policy; this milestone must not depend on
-  the TOML loader.
-
-**Not included:** DNS queries, sockets, probing, or scan output.
-
-**Validation:** unit tests for allowed targets, denied targets, special-use
-addresses, normalization, and ambiguous input. No external network access.
-
-**Definition of done:**
-
-- Authorization lives in its own module, separate from target syntax
-  validation and from configuration loading.
-- Every future DNS or TCP entry point is gated by an authorization decision;
-  no alternative code path bypasses the gate.
-- Special-address classification runs after IPv4-mapped IPv6 normalization.
-- Missing, empty, malformed or unreadable scope data denies all targets.
-- `docs/ARCHITECTURE.md` and `docs/SECURITY.md` are updated, and this roadmap
-  marks the milestone as implemented only after the tests pass.
-
-### b) TOML configuration loading
-
-**Goal:** load operator-provided configuration, including authorization scope,
-from a TOML file.
-
-**Scope:**
-
-- Define and document the configuration schema when it is implemented.
-- Parse TOML with error handling for missing files, malformed TOML, unknown
-  fields, and invalid values.
-- Validate authorization rules before use and fail closed on invalid data.
-- Keep configuration loading independent from network operations.
-- Add deterministic tests using local fixture files.
-
-**Dependencies:** a TOML parser and Serde support will be required. Neither is a
-current dependency; the specific crates must be justified before being added,
-according to `AGENTS.md`.
-
-**Not included:** network activity or implicit authorization defaults.
-
-**Definition of done:**
-
-- A missing, unreadable, malformed or partially valid file denies all targets.
-- The schema is documented and tested with local fixture files.
-- Configuration loading performs no network access and does not grant implicit
-  scope.
+The order below is intentional. Authorization and configuration are already in
+place, so no later network feature may operate without explicit scope. No DNS,
+discovery or TCP functionality should be merged without preserving the
+authorization gate.
 
 ### c) Host discovery
 
@@ -273,7 +247,7 @@ Every milestone should follow the project checks:
 
 ```sh
 cargo fmt --check
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
 cargo test
 cargo check
 ```
