@@ -1,4 +1,7 @@
+#![forbid(unsafe_code)]
+
 mod cli;
+mod target;
 
 use clap::Parser;
 use cli::{Cli, Commands};

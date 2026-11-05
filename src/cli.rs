@@ -1,6 +1,12 @@
 //! Command-line interface definition for NetVigil.
 
-use clap::{Args, Parser, Subcommand};
+use std::ffi::OsStr;
+
+use clap::builder::TypedValueParser;
+use clap::error::ErrorKind;
+use clap::{Arg, Args, Command, Parser, Subcommand};
+
+use crate::target::{Target, TargetError};
 
 /// Network intelligence and reconnaissance CLI.
 #[derive(Debug, Parser)]
@@ -26,24 +32,60 @@ pub enum Commands {
 #[derive(Debug, Args)]
 pub struct ScanArgs {
     /// Target to scan, such as a hostname or IP address.
-    #[arg(value_name = "TARGET", value_parser = parse_target)]
-    pub target: String,
+    #[arg(value_name = "TARGET", value_parser = TargetParser)]
+    pub target: Target,
 }
 
-/// Validates a positional scan target.
+/// Value parser that validates targets without echoing the raw input.
 ///
-/// Only rejects empty or whitespace-containing values for now. Target format
-/// validation belongs to the scanner once it is implemented.
-fn parse_target(value: &str) -> Result<String, String> {
-    if value.trim().is_empty() {
-        return Err("target must not be empty".to_owned());
-    }
+/// Clap's built-in function parser includes the rejected value in its error
+/// message. Returning a [`clap::Error`] directly keeps error output generic,
+/// preventing terminal escape and log injection from hostile targets.
+#[derive(Debug, Clone, Copy)]
+struct TargetParser;
 
-    if value.chars().any(char::is_whitespace) {
-        return Err("target must not contain whitespace".to_owned());
-    }
+impl TypedValueParser for TargetParser {
+    type Value = Target;
 
-    Ok(value.to_owned())
+    fn parse_ref(
+        &self,
+        cmd: &Command,
+        _arg: Option<&Arg>,
+        value: &OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let value = value
+            .to_str()
+            .ok_or_else(|| invalid_target_error(cmd, "target must be valid UTF-8"))?;
+
+        Target::parse(value).map_err(|error| invalid_target_error(cmd, safe_error_reason(&error)))
+    }
+}
+
+/// Builds a Clap error that never includes the rejected input.
+fn invalid_target_error(cmd: &Command, reason: &str) -> clap::Error {
+    let mut command = cmd.clone();
+    command.error(
+        ErrorKind::ValueValidation,
+        format!("invalid target: {reason}"),
+    )
+}
+
+/// Returns a user-facing reason that never contains input-derived data.
+///
+/// The match is exhaustive on purpose: adding a [`TargetError`] variant forces
+/// a decision about what is safe to display to the user.
+fn safe_error_reason(error: &TargetError) -> &'static str {
+    match error {
+        TargetError::Empty => "target must not be empty",
+        TargetError::Whitespace => "target must not contain whitespace",
+        TargetError::TooLong => "target is too long",
+        TargetError::LabelTooLong => "target contains an overly long label",
+        TargetError::EmptyLabel => "target contains empty labels",
+        TargetError::LabelStartsWithHyphen => "target contains a label starting with a hyphen",
+        TargetError::LabelEndsWithHyphen => "target contains a label ending with a hyphen",
+        TargetError::InvalidCharacter(_) => "target contains invalid characters",
+        TargetError::NumericTopLevelLabel => "target must not end with a numeric label",
+    }
 }
 
 #[cfg(test)]
@@ -63,9 +105,104 @@ mod tests {
         match cli {
             Ok(Cli {
                 command: Commands::Scan(args),
-            }) => assert_eq!(args.target, "127.0.0.1"),
+            }) => assert_eq!(args.target.to_string(), "127.0.0.1"),
             other => panic!("expected scan subcommand, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn normalizes_hostname_target() {
+        let cli = Cli::try_parse_from(["netvigil", "scan", "Example.COM."]);
+
+        match cli {
+            Ok(Cli {
+                command: Commands::Scan(args),
+            }) => assert_eq!(args.target.as_hostname(), Some("example.com")),
+            other => panic!("expected scan subcommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalizes_ipv4_mapped_ipv6_target() {
+        let cli = Cli::try_parse_from(["netvigil", "scan", "::ffff:127.0.0.1"]);
+
+        match cli {
+            Ok(Cli {
+                command: Commands::Scan(args),
+            }) => {
+                assert_eq!(
+                    args.target.as_ip(),
+                    Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+                );
+                assert_eq!(args.target.to_string(), "127.0.0.1");
+            }
+            other => panic!("expected scan subcommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_hostname_target() {
+        assert!(Cli::try_parse_from(["netvigil", "scan", "-invalid.com"]).is_err());
+        assert!(Cli::try_parse_from(["netvigil", "scan", "exa_mple.com"]).is_err());
+    }
+
+    #[test]
+    fn rejects_control_characters_without_echoing_input() {
+        let error = Cli::try_parse_from(["netvigil", "scan", "evil\u{1b}host"])
+            .expect_err("control character must be rejected");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+
+        let message = error.to_string();
+        assert!(message.contains("invalid target"));
+        assert!(!message.contains("evil"), "error leaked input: {message:?}");
+        assert!(!message.contains('\u{1b}'), "error leaked ESC: {message:?}");
+    }
+
+    #[test]
+    fn rejects_unicode_format_characters_without_echoing_input() {
+        for character in ['\u{9b}', '\u{200b}', '\u{202e}', '\u{2066}', '\u{feff}'] {
+            let input = format!("evil{character}host");
+            let error = Cli::try_parse_from(["netvigil", "scan", input.as_str()])
+                .expect_err("format character must be rejected");
+            let message = error.to_string();
+
+            assert!(
+                !message.contains(character),
+                "error leaked {character:?}: {message:?}"
+            );
+            assert!(!message.contains("evil"), "error leaked input: {message:?}");
+            assert!(message.contains("invalid target"));
+        }
+    }
+
+    #[test]
+    fn rejects_line_separators_without_echoing_input() {
+        for character in ['\u{2028}', '\u{2029}'] {
+            let input = format!("evil{character}host");
+            let error = Cli::try_parse_from(["netvigil", "scan", input.as_str()])
+                .expect_err("line separator must be rejected");
+            let message = error.to_string();
+
+            assert!(
+                !message.contains(character),
+                "error leaked {character:?}: {message:?}"
+            );
+            assert!(!message.contains("evil"), "error leaked input: {message:?}");
+        }
+    }
+
+    #[test]
+    fn invalid_target_error_is_generic() {
+        let error = Cli::try_parse_from(["netvigil", "scan", "exa_mple.com"])
+            .expect_err("invalid hostname must be rejected");
+        let message = error.to_string();
+
+        assert!(message.contains("invalid target"));
+        assert!(
+            !message.contains("exa_mple.com"),
+            "error leaked input: {message:?}"
+        );
     }
 
     #[test]
