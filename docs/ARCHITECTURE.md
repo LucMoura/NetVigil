@@ -355,6 +355,7 @@ The actual dependency set is intentionally small:
 | Rust | stable, edition 2024 | Implementation language; no MSRV is declared |
 | `clap` (feature `derive`) | 4.6.7 | CLI parsing, help and version output |
 | `ipnet` | 2.12.2 | CIDR parsing and containment checks |
+| `libc` | 0.2 | POSIX system calls used by configuration trust checks |
 | `serde` (feature `derive`) | 1.0.229 | Configuration deserialization |
 | `thiserror` | 2.0.21 | Error implementations |
 | `toml` (features `parse`, `serde`, `std`) | 1.2.0 | TOML configuration parsing |
@@ -421,8 +422,8 @@ Unit tests are inline in `src/cli.rs`, `src/config.rs`, `src/scope.rs` and
 compiled binary against local configuration fixtures. They are deterministic
 and do not require external network access.
 
-At the time of this document, `cargo test` reports 114 passing tests on Linux
-(101 unit tests and 13 integration tests). The tests cover:
+At the time of this document, `cargo test` reports 119 passing tests on Linux
+(106 unit tests and 13 integration tests). The tests cover:
 
 - CLI command definition, help, version and explicit `--config` behavior.
 - Required `TARGET` handling and parsing of valid IP and hostname targets.
